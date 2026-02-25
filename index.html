@@ -172,11 +172,18 @@ function addPlayer(name) {
     showAddToast(`${name} is already in the list!`, '#ef4444');
     return;
   }
+  // Between games, new players get fair priority based on current queue state
+  // so they enter the Next Up list instead of being stuck behind all waiting players
+  let initialSatOut = 0;
+  if (!state.gameInProgress && state.gameNumber > 0) {
+    const nonZeroSats = getActivePlayers().map(p => p.gamesSatOut).filter(s => s > 0);
+    initialSatOut = nonZeroSats.length > 0 ? Math.min(...nonZeroSats) : 1;
+  }
   state.players.push({
     id: Date.now(),
     name,
     arrivalOrder: state.players.length,
-    gamesSatOut: 0,
+    gamesSatOut: initialSatOut,
     gamesPlayed: 0,
     active: true,
     queueOrder: null,
