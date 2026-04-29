@@ -114,11 +114,213 @@
   .court-btn.cancel { background: #1a1a1a; color: #888; border: 1px solid #333; }
   .court-empty { text-align: center; padding: 18px 12px; color: #666; font-size: 13px; }
   .pair-line { font-size: 11px; color: #ec4899; margin-top: 6px; }
+
+  /* Live sync session bar */
+  .session-bar { display: flex; align-items: center; gap: 8px; background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 10px 14px; margin-bottom: 16px; flex-wrap: wrap; }
+  .session-bar button { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; color: #aaa; white-space: nowrap; }
+  .session-bar button.primary { border-color: #22c55e; color: #22c55e; background: #22c55e22; }
+  .session-bar button.danger { border-color: #ef4444; color: #ef4444; background: #ef444422; }
+  .sync-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px; }
+  .sync-badge.live { color: #4ade80; background: #4ade8018; }
+  .sync-badge.reconnecting { color: #f59e0b; background: #f59e0b18; }
+  .session-code { font-family: monospace; font-size: 16px; font-weight: 700; color: #fff; letter-spacing: 2px; }
 </style>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 </head>
 <body>
 <div id="app"></div>
 <script>
+// --- Live sync (Firebase) ---
+const session = {
+  id: null,
+  ref: null,
+  listener: null,
+  isRemoteUpdate: false,
+  connected: false,
+};
+
+let db = null;
+let firebaseReady = false;
+
+if (typeof firebase !== 'undefined') {
+  try {
+    firebase.initializeApp({
+      apiKey: "AIzaSyDi_vRTQeVRorXg3aAIx3VUZ3_fDGK9P0k",
+      authDomain: "mpbl-queue.firebaseapp.com",
+      databaseURL: "https://mpbl-queue-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "mpbl-queue",
+      storageBucket: "mpbl-queue.firebasestorage.app",
+      messagingSenderId: "579220493421",
+      appId: "1:579220493421:web:707f29a7817b4c78245b64"
+    });
+    db = firebase.database();
+    firebaseReady = true;
+    db.ref('.info/connected').on('value', snap => {
+      const wasConnected = session.connected;
+      session.connected = !!snap.val();
+      if (session.id && wasConnected !== session.connected) render();
+    });
+  } catch(e) { firebaseReady = false; }
+}
+
+function generateSessionId() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+function ensureArray(val) {
+  if (!val) return [];
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'object') return Object.values(val);
+  return [];
+}
+
+let syncTimeout = null;
+function syncToFirebase() {
+  if (!session.id || !session.ref || session.isRemoteUpdate) return;
+  clearTimeout(syncTimeout);
+  syncTimeout = setTimeout(() => {
+    session.ref.child('state').set({
+      numCourts: state.numCourts,
+      players: state.players,
+      courts: state.courts,
+      pairs: state.pairs,
+      gameNumber: state.gameNumber,
+      history: state.history,
+    }).catch(() => {});
+  }, 300);
+}
+
+function onRemoteState(snap) {
+  const data = snap.val();
+  if (!data) return;
+  session.isRemoteUpdate = true;
+  state.numCourts = data.numCourts != null ? data.numCourts : null;
+  state.players = ensureArray(data.players).map(p => ({
+    id: p.id,
+    name: p.name,
+    arrivalOrder: p.arrivalOrder,
+    gamesSatOut: p.gamesSatOut || 0,
+    gamesPlayed: p.gamesPlayed || 0,
+    active: p.active !== false,
+    queueOrder: p.queueOrder != null ? p.queueOrder : null,
+    lastResult: p.lastResult || null,
+    lastTeammates: ensureArray(p.lastTeammates),
+  }));
+  state.courts = ensureArray(data.courts).map(c => ({
+    id: c.id,
+    status: c.status || 'idle',
+    teamA: ensureArray(c.teamA),
+    teamB: ensureArray(c.teamB),
+    gameNumber: c.gameNumber != null ? c.gameNumber : null,
+    startedAt: c.startedAt != null ? c.startedAt : null,
+  }));
+  state.pairs = ensureArray(data.pairs).map(p => ensureArray(p));
+  state.gameNumber = data.gameNumber || 0;
+  state.history = ensureArray(data.history).map(h => ({
+    game: h.game,
+    court: h.court,
+    teamA: ensureArray(h.teamA),
+    teamB: ensureArray(h.teamB),
+    winner: h.winner,
+  }));
+  try {
+    localStorage.setItem('pickle-queue-state', JSON.stringify({
+      numCourts: state.numCourts,
+      players: state.players,
+      courts: state.courts,
+      pairs: state.pairs,
+      gameNumber: state.gameNumber,
+      history: state.history,
+    }));
+  } catch(e) {}
+  session.isRemoteUpdate = false;
+  render();
+}
+
+function createSession() {
+  if (!firebaseReady) { alert('Live sync unavailable — could not load Firebase.'); return; }
+  const id = generateSessionId();
+  const ref = db.ref('sessions/' + id);
+  session.id = id;
+  session.ref = ref;
+  ref.child('state').set({
+    numCourts: state.numCourts,
+    players: state.players,
+    courts: state.courts,
+    pairs: state.pairs,
+    gameNumber: state.gameNumber,
+    history: state.history,
+  });
+  ref.child('createdAt').set(Date.now());
+  session.listener = ref.child('state').on('value', onRemoteState);
+  localStorage.setItem('pickle-queue-session', id);
+  const url = new URL(window.location);
+  url.searchParams.set('session', id);
+  window.history.replaceState({}, '', url);
+  render();
+}
+
+function joinSession(id) {
+  if (!firebaseReady) { alert('Live sync unavailable — could not load Firebase.'); return; }
+  id = id.trim().toUpperCase();
+  if (id.length !== 6) { alert('Session code must be 6 characters.'); return; }
+  const ref = db.ref('sessions/' + id);
+  ref.child('createdAt').once('value').then(snap => {
+    if (!snap.exists()) { alert('Session not found. Check the code and try again.'); return; }
+    if (session.listener && session.ref) session.ref.child('state').off('value', session.listener);
+    session.id = id;
+    session.ref = ref;
+    session.listener = ref.child('state').on('value', onRemoteState);
+    localStorage.setItem('pickle-queue-session', id);
+    const url = new URL(window.location);
+    url.searchParams.set('session', id);
+    window.history.replaceState({}, '', url);
+    render();
+  }).catch(err => { console.error('joinSession error:', err); alert('Could not connect. Check your internet and try again.'); });
+}
+
+function leaveSession() {
+  if (session.listener && session.ref) session.ref.child('state').off('value', session.listener);
+  session.id = null;
+  session.ref = null;
+  session.listener = null;
+  session.isRemoteUpdate = false;
+  localStorage.removeItem('pickle-queue-session');
+  const url = new URL(window.location);
+  url.searchParams.delete('session');
+  window.history.replaceState({}, '', url);
+  render();
+}
+
+function shareSession() {
+  if (!session.id) return;
+  const url = new URL(window.location);
+  url.searchParams.set('session', session.id);
+  navigator.clipboard.writeText(url.toString()).then(() => {
+    showBottomToast('✓ Session link copied!', '#22c55e');
+  }).catch(() => {
+    prompt('Share this link:', url.toString());
+  });
+}
+
+function promptJoinSession() {
+  const code = prompt('Enter 6-character session code:');
+  if (code && code.trim()) joinSession(code);
+}
+
+function autoJoinSession() {
+  if (!firebaseReady) return;
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlSession = urlParams.get('session');
+  const savedSession = localStorage.getItem('pickle-queue-session');
+  const sessionId = urlSession || savedSession;
+  if (sessionId) joinSession(sessionId);
+}
+
 const PLAYERS_PER_COURT = 4;
 
 let state = {
@@ -162,6 +364,7 @@ function saveState() {
       history: state.history,
     }));
   } catch(e) {}
+  syncToFirebase();
 }
 
 function getPriority(p) {
@@ -719,6 +922,26 @@ function courtCardHTML(court) {
     </div>`;
 }
 
+function sessionBarHTML() {
+  if (!firebaseReady) return '';
+  if (session.id) {
+    const syncClass = session.connected ? 'live' : 'reconnecting';
+    const syncText = session.connected ? 'Live Sync' : 'Reconnecting...';
+    const syncDot = session.connected ? '🟢' : '🟡';
+    return `<div class="session-bar">
+      <span class="sync-badge ${syncClass}">${syncDot} ${syncText}</span>
+      <span class="session-code">${esc(session.id)}</span>
+      <span style="flex:1"></span>
+      <button onclick="shareSession()">Share</button>
+      <button class="danger" onclick="leaveSession()">Leave</button>
+    </div>`;
+  }
+  return `<div class="session-bar">
+    <button class="primary" onclick="createSession()">Start Live Sync</button>
+    <button onclick="promptJoinSession()">Join Session</button>
+  </div>`;
+}
+
 function render() {
   const app = document.getElementById('app');
 
@@ -730,6 +953,7 @@ function render() {
         <h1>Pickle Queue</h1>
         <p>Doubles rotation · multi-court · stacking-style mixing</p>
       </div>
+      ${sessionBarHTML()}
       <div class="setup-card">
         <h2>How many courts today?</h2>
         <p>Pick at session start — you can't change this mid-session.</p>
@@ -755,6 +979,7 @@ function render() {
       <h1>Pickle Queue</h1>
       <p>${state.numCourts} court${state.numCourts > 1 ? 's' : ''} · doubles · fair rotation</p>
     </div>
+    ${sessionBarHTML()}
     <div class="stats">
       <div class="stat"><div class="stat-val" style="color:#22c55e">${active.length}</div><div class="stat-label">Players</div></div>
       <div class="stat"><div class="stat-val" style="color:#3b82f6">${courtsRunning}/${state.numCourts}</div><div class="stat-label">Courts</div></div>
@@ -989,6 +1214,7 @@ function copyToClipboard(text, msg) {
 }
 
 render();
+autoJoinSession();
 </script>
 </body>
 </html>
