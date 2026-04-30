@@ -126,6 +126,7 @@
   .session-code { font-family: monospace; font-size: 16px; font-weight: 700; color: #fff; letter-spacing: 2px; }
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 </head>
 <body>
@@ -142,6 +143,8 @@ const session = {
 
 let db = null;
 let firebaseReady = false;
+let authReady = Promise.reject(new Error('firebase-not-initialized'));
+authReady.catch(() => {});
 
 if (typeof firebase !== 'undefined') {
   try {
@@ -156,6 +159,8 @@ if (typeof firebase !== 'undefined') {
     });
     db = firebase.database();
     firebaseReady = true;
+    authReady = firebase.auth().signInAnonymously()
+      .catch(err => { console.error('Anonymous auth failed:', err); throw err; });
     db.ref('.info/connected').on('value', snap => {
       const wasConnected = session.connected;
       session.connected = !!snap.val();
@@ -243,43 +248,47 @@ function onRemoteState(snap) {
 
 function createSession() {
   if (!firebaseReady) { alert('Live sync unavailable — could not load Firebase.'); return; }
-  const id = generateSessionId();
-  const ref = db.ref('sessions/' + id);
-  session.id = id;
-  session.ref = ref;
-  ref.child('state').set({
-    numCourts: state.numCourts,
-    players: state.players,
-    courts: state.courts,
-    pairs: state.pairs,
-    gameNumber: state.gameNumber,
-    history: state.history,
-  });
-  ref.child('createdAt').set(Date.now());
-  session.listener = ref.child('state').on('value', onRemoteState);
-  localStorage.setItem('pickle-queue-session', id);
-  const url = new URL(window.location);
-  url.searchParams.set('session', id);
-  window.history.replaceState({}, '', url);
-  render();
-}
-
-function joinSession(id) {
-  if (!firebaseReady) { alert('Live sync unavailable — could not load Firebase.'); return; }
-  id = id.trim().toUpperCase();
-  if (id.length !== 6) { alert('Session code must be 6 characters.'); return; }
-  const ref = db.ref('sessions/' + id);
-  ref.child('createdAt').once('value').then(snap => {
-    if (!snap.exists()) { alert('Session not found. Check the code and try again.'); return; }
-    if (session.listener && session.ref) session.ref.child('state').off('value', session.listener);
+  authReady.then(() => {
+    const id = generateSessionId();
+    const ref = db.ref('sessions/' + id);
     session.id = id;
     session.ref = ref;
+    ref.child('state').set({
+      numCourts: state.numCourts,
+      players: state.players,
+      courts: state.courts,
+      pairs: state.pairs,
+      gameNumber: state.gameNumber,
+      history: state.history,
+    });
+    ref.child('createdAt').set(Date.now());
     session.listener = ref.child('state').on('value', onRemoteState);
     localStorage.setItem('pickle-queue-session', id);
     const url = new URL(window.location);
     url.searchParams.set('session', id);
     window.history.replaceState({}, '', url);
     render();
+  }).catch(() => alert('Live sync unavailable — sign-in failed.'));
+}
+
+function joinSession(id) {
+  if (!firebaseReady) { alert('Live sync unavailable — could not load Firebase.'); return; }
+  id = id.trim().toUpperCase();
+  if (id.length !== 6) { alert('Session code must be 6 characters.'); return; }
+  authReady.then(() => {
+    const ref = db.ref('sessions/' + id);
+    return ref.child('createdAt').once('value').then(snap => {
+      if (!snap.exists()) { alert('Session not found. Check the code and try again.'); return; }
+      if (session.listener && session.ref) session.ref.child('state').off('value', session.listener);
+      session.id = id;
+      session.ref = ref;
+      session.listener = ref.child('state').on('value', onRemoteState);
+      localStorage.setItem('pickle-queue-session', id);
+      const url = new URL(window.location);
+      url.searchParams.set('session', id);
+      window.history.replaceState({}, '', url);
+      render();
+    });
   }).catch(err => { console.error('joinSession error:', err); alert('Could not connect. Check your internet and try again.'); });
 }
 

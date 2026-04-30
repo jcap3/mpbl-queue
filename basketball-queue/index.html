@@ -89,6 +89,7 @@
   .session-code { font-family: monospace; font-size: 16px; font-weight: 700; color: #fff; letter-spacing: 2px; }
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 </head>
 <body>
@@ -107,6 +108,8 @@ const session = {
 let db = null;
 let firebaseReady = false;
 let serverTimeOffset = 0;
+let authReady = Promise.reject(new Error('firebase-not-initialized'));
+authReady.catch(() => {});
 
 if (typeof firebase !== 'undefined') {
   try {
@@ -121,6 +124,8 @@ if (typeof firebase !== 'undefined') {
     });
     db = firebase.database();
     firebaseReady = true;
+    authReady = firebase.auth().signInAnonymously()
+      .catch(err => { console.error('Anonymous auth failed:', err); throw err; });
     db.ref('.info/serverTimeOffset').on('value', snap => { serverTimeOffset = snap.val() || 0; });
     db.ref('.info/connected').on('value', snap => {
       const wasConnected = session.connected;
@@ -196,36 +201,38 @@ function applyRemoteTimer(timerState) {
 
 function createSession() {
   if (!firebaseReady) { alert('Live sync unavailable — could not load Firebase.'); return; }
-  const id = generateSessionId();
-  const ref = db.ref('sessions/' + id);
-  session.id = id;
-  session.ref = ref;
+  authReady.then(() => {
+    const id = generateSessionId();
+    const ref = db.ref('sessions/' + id);
+    session.id = id;
+    session.ref = ref;
 
-  // Write current state
-  const timerState = {
-    running: state.timerRunning,
-    duration: GAME_DURATION,
-    remainingAtPause: state.timer,
-    startedAt: state.timerRunning ? serverNow() - (GAME_DURATION - state.timer) * 1000 : null,
-  };
-  ref.child('state').set({
-    players: state.players,
-    gameInProgress: state.gameInProgress,
-    currentGame: state.currentGame,
-    gameNumber: state.gameNumber,
-    history: state.history,
-    timer: state.timer,
-    timerState,
-  });
-  ref.child('createdAt').set(serverNow());
+    // Write current state
+    const timerState = {
+      running: state.timerRunning,
+      duration: GAME_DURATION,
+      remainingAtPause: state.timer,
+      startedAt: state.timerRunning ? serverNow() - (GAME_DURATION - state.timer) * 1000 : null,
+    };
+    ref.child('state').set({
+      players: state.players,
+      gameInProgress: state.gameInProgress,
+      currentGame: state.currentGame,
+      gameNumber: state.gameNumber,
+      history: state.history,
+      timer: state.timer,
+      timerState,
+    });
+    ref.child('createdAt').set(serverNow());
 
-  // Start listening
-  session.listener = ref.child('state').on('value', onRemoteState);
-  localStorage.setItem('pickup-queue-session', id);
-  const url = new URL(window.location);
-  url.searchParams.set('session', id);
-  window.history.replaceState({}, '', url);
-  render();
+    // Start listening
+    session.listener = ref.child('state').on('value', onRemoteState);
+    localStorage.setItem('pickup-queue-session', id);
+    const url = new URL(window.location);
+    url.searchParams.set('session', id);
+    window.history.replaceState({}, '', url);
+    render();
+  }).catch(() => alert('Live sync unavailable — sign-in failed.'));
 }
 
 function onRemoteState(snap) {
@@ -265,19 +272,21 @@ function joinSession(id) {
   if (!firebaseReady) { alert('Live sync unavailable — could not load Firebase.'); return; }
   id = id.trim().toUpperCase();
   if (id.length !== 6) { alert('Session code must be 6 characters.'); return; }
-  const ref = db.ref('sessions/' + id);
-  ref.child('createdAt').once('value').then(snap => {
-    if (!snap.exists()) { alert('Session not found. Check the code and try again.'); return; }
-    // Detach any existing listener
-    if (session.listener && session.ref) session.ref.child('state').off('value', session.listener);
-    session.id = id;
-    session.ref = ref;
-    session.listener = ref.child('state').on('value', onRemoteState);
-    localStorage.setItem('pickup-queue-session', id);
-    const url = new URL(window.location);
-    url.searchParams.set('session', id);
-    window.history.replaceState({}, '', url);
-    render();
+  authReady.then(() => {
+    const ref = db.ref('sessions/' + id);
+    return ref.child('createdAt').once('value').then(snap => {
+      if (!snap.exists()) { alert('Session not found. Check the code and try again.'); return; }
+      // Detach any existing listener
+      if (session.listener && session.ref) session.ref.child('state').off('value', session.listener);
+      session.id = id;
+      session.ref = ref;
+      session.listener = ref.child('state').on('value', onRemoteState);
+      localStorage.setItem('pickup-queue-session', id);
+      const url = new URL(window.location);
+      url.searchParams.set('session', id);
+      window.history.replaceState({}, '', url);
+      render();
+    });
   }).catch(err => { console.error('joinSession error:', err); alert('Could not connect. Check your internet and try again.'); });
 }
 
