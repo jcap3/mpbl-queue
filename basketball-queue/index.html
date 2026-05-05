@@ -171,6 +171,7 @@ function syncToFirebase() {
       history: state.history,
       timer: state.timer,
       timerState,
+      undoSnapshot: state.undoSnapshot || null,
     }).catch(() => {});
   }, 300);
 }
@@ -252,6 +253,7 @@ function onRemoteState(snap) {
   state.currentGame = ensureArray(data.currentGame);
   state.gameNumber = data.gameNumber || 0;
   state.history = ensureArray(data.history);
+  state.undoSnapshot = normalizeUndoSnapshot(data.undoSnapshot);
   applyRemoteTimer(data.timerState);
   // Save to localStorage as offline fallback
   try {
@@ -262,6 +264,7 @@ function onRemoteState(snap) {
       gameNumber: state.gameNumber,
       history: state.history,
       timer: state.timer,
+      undoSnapshot: state.undoSnapshot,
     }));
   } catch(e) {}
   session.isRemoteUpdate = false;
@@ -346,6 +349,7 @@ let state = {
   swapMode: false,
   swapFirst: null, // player id of first swap selection
   swappedIds: [], // recently swapped player ids for animation
+  undoSnapshot: null, // snapshot of pre-action state for undoing last start/end game
 };
 
 // Try to load saved state
@@ -360,6 +364,7 @@ try {
     state.gameNumber = parsed.gameNumber || 0;
     state.history = parsed.history || [];
     state.timer = parsed.timer || GAME_DURATION;
+    state.undoSnapshot = parsed.undoSnapshot || null;
   }
 } catch(e) {}
 
@@ -372,6 +377,7 @@ function saveState() {
       gameNumber: state.gameNumber,
       history: state.history,
       timer: state.timer,
+      undoSnapshot: state.undoSnapshot,
     }));
   } catch(e) {}
   syncToFirebase();
@@ -660,11 +666,41 @@ function handleSwapTap(id) {
   }
 }
 
+function normalizeUndoSnapshot(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const snap = {
+    type: raw.type,
+    action: raw.action,
+    gameInProgress: !!raw.gameInProgress,
+    currentGame: ensureArray(raw.currentGame),
+    gameNumber: raw.gameNumber || 0,
+    timer: raw.timer != null ? raw.timer : GAME_DURATION,
+  };
+  if (raw.history) snap.history = ensureArray(raw.history);
+  if (raw.playerStats) {
+    snap.playerStats = ensureArray(raw.playerStats).map(s => ({
+      id: s.id,
+      gamesPlayed: s.gamesPlayed || 0,
+      gamesSatOut: s.gamesSatOut || 0,
+      queueOrder: s.queueOrder != null ? s.queueOrder : null,
+    }));
+  }
+  return snap;
+}
+
 function startGame() {
   if (getActivePlayers().length < PLAYERS_PER_GAME) {
     alert(`Need at least ${PLAYERS_PER_GAME} players!`);
     return;
   }
+  state.undoSnapshot = {
+    type: 'start',
+    action: `Start of Game ${state.gameNumber + 1}`,
+    gameInProgress: state.gameInProgress,
+    currentGame: [...state.currentGame],
+    gameNumber: state.gameNumber,
+    timer: state.timer,
+  };
   const nextUp = getNextGamePlayers();
   state.currentGame = nextUp.map(p => p.id);
   state.gameInProgress = true;
@@ -676,6 +712,21 @@ function startGame() {
 }
 
 function endGame() {
+  state.undoSnapshot = {
+    type: 'end',
+    action: `End of Game ${state.gameNumber}`,
+    gameInProgress: state.gameInProgress,
+    currentGame: [...state.currentGame],
+    gameNumber: state.gameNumber,
+    timer: state.timer,
+    history: JSON.parse(JSON.stringify(state.history)),
+    playerStats: state.players.map(p => ({
+      id: p.id,
+      gamesPlayed: p.gamesPlayed,
+      gamesSatOut: p.gamesSatOut,
+      queueOrder: p.queueOrder != null ? p.queueOrder : null,
+    })),
+  };
   stopTimer();
   state.players.forEach(p => {
     if (!p.active) return;
@@ -694,6 +745,34 @@ function endGame() {
   state.timer = GAME_DURATION;
   saveState();
   render();
+}
+
+function undoLast() {
+  const snap = state.undoSnapshot;
+  if (!snap) return;
+  if (!confirm(`Undo ${snap.action}?\n\nThis restores game state to before that action. Players added since are kept.`)) return;
+  stopTimer();
+  state.gameInProgress = !!snap.gameInProgress;
+  state.currentGame = ensureArray(snap.currentGame);
+  state.gameNumber = snap.gameNumber || 0;
+  state.timer = snap.timer != null ? snap.timer : GAME_DURATION;
+  state.timerRunning = false;
+  if (snap.history) state.history = ensureArray(snap.history);
+  if (snap.playerStats) {
+    const statsById = new Map(snap.playerStats.map(s => [s.id, s]));
+    state.players.forEach(p => {
+      const s = statsById.get(p.id);
+      if (s) {
+        p.gamesPlayed = s.gamesPlayed || 0;
+        p.gamesSatOut = s.gamesSatOut || 0;
+        p.queueOrder = s.queueOrder != null ? s.queueOrder : null;
+      }
+    });
+  }
+  state.undoSnapshot = null;
+  saveState();
+  render();
+  showBottomToast('↩️ Undone — adjust queue and try again', '#a855f7');
 }
 
 function startTimer() {
@@ -859,6 +938,11 @@ function render() {
     html += `<button class="game-btn end" onclick="endGame()">🔔 End Game ${state.gameNumber}</button>`;
   }
 
+  // Undo last start/end game
+  if (state.undoSnapshot) {
+    html += `<button onclick="undoLast()" style="width:100%;padding:10px;border-radius:10px;border:1px solid #a855f7;background:#a855f722;color:#a855f7;font-size:13px;font-weight:600;cursor:pointer;margin-bottom:16px;margin-top:-8px;">↩️ Undo ${esc(state.undoSnapshot.action)}</button>`;
+  }
+
   // Currently playing
   if (state.gameInProgress) {
     const playing = state.players.filter(p => state.currentGame.includes(p.id));
@@ -941,7 +1025,7 @@ function render() {
     <div style="text-align:center;font-size:11px;color:#555;margin-top:6px;">Transfer queue to another phone</div>`;
 
   // Reset button
-  html += `<div style="margin-top:16px;text-align:center"><button onclick="if(confirm('Reset everything?')){state.players=[];state.currentGame=[];state.gameNumber=0;state.history=[];state.gameInProgress=false;state.timer=${GAME_DURATION};stopTimer();saveState();render();}" style="background:none;border:1px solid #333;color:#555;border-radius:8px;padding:8px 16px;font-size:12px;cursor:pointer">Reset All</button></div>`;
+  html += `<div style="margin-top:16px;text-align:center"><button onclick="if(confirm('Reset everything?')){state.players=[];state.currentGame=[];state.gameNumber=0;state.history=[];state.gameInProgress=false;state.timer=${GAME_DURATION};state.undoSnapshot=null;stopTimer();saveState();render();}" style="background:none;border:1px solid #333;color:#555;border-radius:8px;padding:8px 16px;font-size:12px;cursor:pointer">Reset All</button></div>`;
 
   // Info
   html += `
@@ -1014,6 +1098,7 @@ function showImportDialog() {
     state.editMode = false;
     state.swapMode = false;
     state.swapFirst = null;
+    state.undoSnapshot = null;
     if (state.gameInProgress) startTimer();
     saveState();
     render();
